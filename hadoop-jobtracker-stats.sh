@@ -1,9 +1,7 @@
-#!/usr/bin/sh
+#!/bin/bash
 
 #--------------------------------------------------------------------------------------------
 # Expecting the following arguments in order -
-# <ignore_value> = this is a parameter that is inserted by Zabbix
-#                  It represents hostname/ip address entered in the host configuration.
 # host = hostname/ip-address of Hadoop cluster JobTracker server.
 #        This is made available as a macro in host configuration.
 # port = Port # on which the JobTracker metrics are available (default = 50030)
@@ -16,13 +14,8 @@ COMMAND_LINE="$0 $*"
 
 export SCRIPT_NAME="$0"
 
-#--------------------------------------------------------------------------------------------
-# Ignore the first parameter - which is ALWAYS inserted implicitly by Zabbix
-#--------------------------------------------------------------------------------------------
-shift ;
-
 usage() {
-   echo "Usage: $SCRIPT_NAME <discarded_value> <host> <port> <zabbix_name>"
+   echo "Usage: $SCRIPT_NAME <host> <port> <zabbix_name>"
 }
 
 if [ $# -ne 3 ]
@@ -47,9 +40,9 @@ export ZABBIX_NAME=$3
 #--------------------------------------------------------------------------------------------
 # Set the data output file and the log fle from zabbix_sender
 #--------------------------------------------------------------------------------------------
-export RAW_FILE="/tmp/${ZABBIX_NAME}.raw"
-export DATA_FILE="/tmp/${ZABBIX_NAME}.txt"
-export LOG_FILE="/tmp/${ZABBIX_NAME}.log"
+export RAW_FILE="/tmp/${ZABBIX_NAME}_jobtracker.raw"
+export DATA_FILE="/tmp/${ZABBIX_NAME}_jobtracker.txt"
+export LOG_FILE="/tmp/${ZABBIX_NAME}_jobtracker.log"
 
 
 #--------------------------------------------------------------------------------------------
@@ -58,7 +51,7 @@ export LOG_FILE="/tmp/${ZABBIX_NAME}.log"
 # The final result of screen scraping is a file containing data in the following format -
 # <ZABBIX_NAME> <METRIC_NAME> <METRIC_VALUE>
 #--------------------------------------------------------------------------------------------
-curl --silent http://${CLUSTER_HOST}:${METRICS_PORT}/jobtracker.jsp 2>$LOG_FILE  | sed 's/<[^>]*>/|/g' | sed 's/| *| /|/g' | sed 's/: *|/|/g' > $RAW_FILE
+curl --silent http://${CLUSTER_HOST}:${METRICS_PORT}/jobtracker.jsp 2>>$LOG_FILE  | sed 's/<[^>]*>/|/g' | sed 's/| *| /|/g' | sed 's/: *|/|/g' > $RAW_FILE
 
 jobtracker_state="`egrep '^\|State\|' $RAW_FILE | cut -f3 -d'|' | sed 's/ //'`"
 jobtracker_start_time="`egrep '\|Started\|' $RAW_FILE | cut -f3 -d'|' | sed 's/^ //'`"
@@ -81,6 +74,49 @@ completed_jobs="`sed -n '/Completed Jobs/,$p' $RAW_FILE| sed '/Failed Jobs/,$d'|
 failed_jobs="`sed -n '/Failed Jobs/,$p' $RAW_FILE| sed '/Retired Jobs/,$d'| grep job_ | wc -l`"
 retired_jobs="`sed -n '/^|Retired Jobs|/,$p' $RAW_FILE| sed '/^$/,$d'| grep job_| wc -l`"
 
+
+#--------------------------------------------------------------------------------------------
+# Use curl to get node level map and reduce task data
+#--------------------------------------------------------------------------------------------
+curl --silent http://${CLUSTER_HOST}:${METRICS_PORT}/machines.jsp?type=active 2>>$LOG_FILE  | sed 's/<[^>]*>/|/g' | sed 's/| *| /|/g' | sed 's/: *|/|/g' | grep tracker_ | sed 's/^|||||//' | sed 's/^|||//' | grep -v 'Highest Failures' > $RAW_FILE
+
+max_running_tasks="`grep 'tracker_' $RAW_FILE | cut -f6 -d'|' | sed 's/^ //' | sort -nr | head -1 `"
+min_running_tasks="`grep 'tracker_' $RAW_FILE | cut -f6 -d'|' | sed 's/^ //' | sort -n | head -1 `"
+max_configured_map_tasks="`grep 'tracker_' $RAW_FILE | cut -f8 -d'|' | sed 's/^ //' | sort -nr | head -1 `"
+min_configured_map_tasks="`grep 'tracker_' $RAW_FILE | cut -f8 -d'|' | sed 's/^ //' | sort -n | head -1 `"
+max_configured_reduce_tasks="`grep 'tracker_' $RAW_FILE | cut -f10 -d'|' | sed 's/^ //' | sort -nr | head -1 `"
+min_configured_reduce_tasks="`grep 'tracker_' $RAW_FILE | cut -f10 -d'|' | sed 's/^ //' | sort -n | head -1 `"
+
+
+#make sure a value is set, if not sending will fail
+: ${jobtracker_state:=0}
+: ${jobtracker_start_time:=0}
+: ${hadoop_version:=0}
+: ${running_map_tasks:=0}
+: ${running_reduce_tasks:=0}
+: ${total_jobs_submitted:=0}
+: ${total_nodes:=0}
+: ${occupied_map_slots:=0}
+: ${occupied_reduce_slots:=0}
+: ${reserved_map_slots:=0}
+: ${reserved_reduce_slots:=0}
+: ${map_task_capacity:=0}
+: ${reduce_task_capacity:=0}
+: ${avg_task_capacity_per_node:=0}
+: ${blacklisted_nodes:=0}
+: ${excluded_nodes:=0}
+: ${running_jobs:=0}
+: ${completed_jobs:=0}
+: ${failed_jobs:=0}
+: ${retired_jobs:=0}
+
+: ${max_running_tasks:=0}
+: ${min_running_tasks:=0}
+: ${max_configured_map_tasks:=0}
+: ${min_configured_map_tasks:=0}
+: ${max_configured_reduce_tasks:=0}
+: ${min_configured_reduce_tasks:=0}
+
 echo "$ZABBIX_NAME jobtracker_state $jobtracker_state
 $ZABBIX_NAME jobtracker_start_time $jobtracker_start_time
 $ZABBIX_NAME hadoop_version $hadoop_version
@@ -100,20 +136,15 @@ $ZABBIX_NAME excluded_nodes $excluded_nodes
 $ZABBIX_NAME running_jobs $running_jobs
 $ZABBIX_NAME completed_jobs $completed_jobs
 $ZABBIX_NAME failed_jobs $failed_jobs
-$ZABBIX_NAME retired_jobs $retired_jobs " >  $DATA_FILE
+$ZABBIX_NAME retired_jobs $retired_jobs
+$ZABBIX_NAME max_running_tasks $max_running_tasks
+$ZABBIX_NAME min_running_tasks $min_running_tasks
+$ZABBIX_NAME max_configured_map_tasks $max_configured_map_tasks
+$ZABBIX_NAME min_configured_map_tasks $min_configured_map_tasks
+$ZABBIX_NAME max_configured_reduce_tasks $max_configured_reduce_tasks
+$ZABBIX_NAME min_configured_reduce_tasks $min_configured_reduce_tasks" >  $DATA_FILE
 
 
-#--------------------------------------------------------------------------------------------
-# Use curl to get node level map and reduce task data
-#--------------------------------------------------------------------------------------------
-curl --silent http://${CLUSTER_HOST}:${METRICS_PORT}/machines.jsp?type=active 2>$LOG_FILE  | sed 's/<[^>]*>/|/g' | sed 's/| *| /|/g' | sed 's/: *|/|/g' | grep tracker_ | sed 's/^|||||//' | sed 's/^|||//' | grep -v 'Highest Failures' > $RAW_FILE
-
-max_running_tasks="`grep 'tracker_' $RAW_FILE | cut -f6 -d'|' | sed 's/^ //' | sort -nr | head -1 `"
-min_running_tasks="`grep 'tracker_' $RAW_FILE | cut -f6 -d'|' | sed 's/^ //' | sort -n | head -1 `"
-max_configured_map_tasks="`grep 'tracker_' $RAW_FILE | cut -f8 -d'|' | sed 's/^ //' | sort -nr | head -1 `"
-min_configured_map_tasks="`grep 'tracker_' $RAW_FILE | cut -f8 -d'|' | sed 's/^ //' | sort -n | head -1 `"
-max_configured_reduce_tasks="`grep 'tracker_' $RAW_FILE | cut -f10 -d'|' | sed 's/^ //' | sort -nr | head -1 `"
-min_configured_reduce_tasks="`grep 'tracker_' $RAW_FILE | cut -f10 -d'|' | sed 's/^ //' | sort -n | head -1 `"
 
 #--------------------------------------------------------------------------------------------
 # Perform a ping check of the host. Having this item/check makes it easy to debug issues.
